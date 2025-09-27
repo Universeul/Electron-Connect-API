@@ -1,11 +1,13 @@
 from fastapi import FastAPI, Request, Header, Response
-from fastapi.responses import JSONResponse
-import logging
-import json
+import os, hmac, hashlib, base64, json, logging
 
 app = FastAPI(title="ElectronConnect Webhook Receiver")
+SECRET = os.getenv("ELECTRONCONNECT_WEBHOOK_SECRET", "")
 
-# Basic health check
+def compute_sig(raw: bytes) -> str:
+    digest = hmac.new(SECRET.encode("utf-8"), raw, hashlib.sha256).digest()   # steps 1–3
+    return base64.b64encode(digest).decode("ascii")                           # step 4
+
 @app.get("/healthz")
 def health():
     return {"status": "ok"}
@@ -16,27 +18,20 @@ async def electronconnect_webhook(
     x_signature: str | None = Header(default=None),
     x_correlation_id: str | None = Header(default=None),
 ):
-    # 1) Read and keep the raw bytes (for signature verification in Step 3)
-    raw = await request.body()
+    raw = await request.body()  # step 2
 
-    # 2) Log headers for tracing (mask signature length if you prefer)
-    logging.info({
-        "event_source": "electronconnect",
-        "x_correlation_id": x_correlation_id,
-        "x_signature_present": bool(x_signature),
-        "raw_len": len(raw),
-    })
+    # Only enforce validation once the secret has been issued by ElectronConnect
+    if SECRET:
+        expected = compute_sig(raw)
+        if not x_signature or not hmac.compare_digest(expected, x_signature):  # step 5
+            logging.warning({"reason": "bad_signature", "x_correlation_id": x_correlation_id})
+            return Response(status_code=401)  # do not process invalid payloads
 
-    # 3) Parse JSON safely (don’t block the 200 if parsing fails)
+    # safe to parse/act (ack must be near-immediate)
     try:
         payload = json.loads(raw.decode("utf-8"))
     except Exception:
         payload = {"_parse_error": True}
 
-    # (Optional) minimal sanity log of event type
-    event = payload.get("event")
-    logging.info({"received_event": event})
-
-    # 4) ACK **immediately** per spec (do heavy work asynchronously later)
-    #    DispatchInstruction MUST get 200 — we’ll implement signature + worker next steps.
+    logging.info({"received_event": payload.get("event"), "x_correlation_id": x_correlation_id})
     return Response(status_code=200)
