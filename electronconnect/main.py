@@ -12,9 +12,20 @@ app = FastAPI(title="ElectronConnect Webhook Receiver")
 SECRET = os.getenv("ELECTRONCONNECT_WEBHOOK_SECRET", "")
 
 # DATABASE_URL from Render (External Database URL); convert to async driver url
+# DATABASE_URL from Render (External Database URL) → force asyncpg
+def to_asyncpg_url(raw: str) -> str:
+    # normalize old Heroku-style scheme
+    if raw.startswith("postgres://"):
+        raw = "postgresql://" + raw[len("postgres://"):]
+    # force SQLAlchemy to use asyncpg
+    if raw.startswith("postgresql://"):
+        return "postgresql+asyncpg://" + raw[len("postgresql://"):]
+    return raw
+
 RAW_DB_URL = os.getenv("DATABASE_URL", "")
-DB_URL = RAW_DB_URL.replace("postgres://", "postgresql+asyncpg://") if RAW_DB_URL else None
+DB_URL = to_asyncpg_url(RAW_DB_URL) if RAW_DB_URL else None
 engine = create_async_engine(DB_URL, future=True, echo=False) if DB_URL else None
+
 
 # Create a single “log everything” table
 DDL = """
