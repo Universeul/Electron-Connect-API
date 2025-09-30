@@ -156,3 +156,102 @@ async def electronconnect_webhook(
     # 6) ACK immediately per spec
     logging.info({"received_event": event_type, "x_correlation_id": x_correlation_id})
     return Response(status_code=200)
+
+@app.get("/events", response_class=HTMLResponse)
+async def list_events(limit: int = 200, q: str | None = None):
+    """
+    Simple HTML table of recent webhook events.
+    - limit: max rows to show
+    - q: filter by event_type (ILIKE %q%)
+    """
+    if not engine:
+        return HTMLResponse("<h1>No database configured</h1>", status_code=500)
+
+    sql = text("""
+        SELECT id, received_at, event_type, signature_valid, x_correlation_id,
+               remote_addr, raw_body
+        FROM webhook_event
+        WHERE (:q IS NULL OR event_type ILIKE :qp)
+        ORDER BY received_at DESC
+        LIMIT :limit
+    """)
+    params = {"q": q, "qp": f"%{q}%" if q else None, "limit": limit}
+
+    async with engine.begin() as conn:
+        rows = (await conn.execute(sql, params)).mappings().all()
+
+    def render_body(raw: str) -> str:
+        try:
+            pretty = json.dumps(json.loads(raw), indent=2)
+            return f"<pre>{html.escape(pretty)}</pre>"
+        except Exception:
+            snippet = raw if len(raw) < 8000 else raw[:8000] + "…"
+            return f"<pre>{html.escape(snippet)}</pre>"
+
+    head = """
+    <style>
+      body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; padding: 20px; }
+      table { border-collapse: collapse; width: 100%; }
+      th, td { border-bottom: 1px solid #eee; padding: 8px 10px; vertical-align: top; }
+      th { text-align: left; position: sticky; top: 0; background: #fff; }
+      code.bad { color: #b91c1c; font-weight: 600; }
+      code.ok { color: #166534; font-weight: 600; }
+      .toolbar { margin-bottom: 12px; display:flex; gap:10px; align-items:center; }
+      input, select { padding: 6px 8px; }
+      details > summary { cursor: pointer; color: #2563eb; }
+    </style>
+    """
+    toolbar = f"""
+    <div class="toolbar">
+      <form method="get" action="/events">
+        <label>Event filter: <input name="q" value="{html.escape(q or '')}" placeholder="e.g. device.status.updated"></label>
+        <label>Limit: <input type="number" name="limit" min="1" max="10000" value="{limit}"></label>
+        <button type="submit">Apply</button>
+      </form>
+    </div>
+    """
+
+    rows_html = []
+    for r in rows:
+        ok = bool(r["signature_valid"])
+        sig = f'<code class="{"ok" if ok else "bad"}">{"valid" if ok else "invalid"}</code>'
+        rows_html.append(f"""
+        <tr>
+          <td>{r["id"]}</td>
+          <td><code>{html.escape(str(r["received_at"]))}</code></td>
+          <td>{html.escape(r["event_type"] or "")}</td>
+          <td>{sig}</td>
+          <td>{html.escape(r["x_correlation_id"] or "")}</td>
+          <td>{html.escape(r["remote_addr"] or "")}</td>
+          <td>
+            <details>
+              <summary>View payload</summary>
+              {render_body(r["raw_body"] or "")}
+            </details>
+          </td>
+        </tr>
+        """)
+
+    html_page = f"""
+    {head}
+    <h1>Webhook Events</h1>
+    {toolbar}
+    <table>
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Received</th>
+          <th>Event Type</th>
+          <th>Signature</th>
+          <th>Correlation ID</th>
+          <th>IP</th>
+          <th>Payload</th>
+        </tr>
+      </thead>
+      <tbody>
+        {''.join(rows_html) if rows_html else '<tr><td colspan="7"><em>No events yet.</em></td></tr>'}
+      </tbody>
+    </table>
+    """
+    return HTMLResponse(html_page)
+
