@@ -80,6 +80,10 @@ async def startup():
 def health():
     return {"status": "ok"}
 
+@app.get("/", include_in_schema=False)
+def index():
+    return RedirectResponse(url="/events")
+
 @app.get("/debug/events")
 async def debug_events(limit: int = 20):
     """Quick view of recent stored events (remove in prod if you prefer)."""
