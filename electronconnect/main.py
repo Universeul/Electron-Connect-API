@@ -158,100 +158,88 @@ async def electronconnect_webhook(
     return Response(status_code=200)
 
 @app.get("/events", response_class=HTMLResponse)
-async def list_events(limit: int = 200, q: str | None = None):
-    """
-    Simple HTML table of recent webhook events.
-    - limit: max rows to show
-    - q: filter by event_type (ILIKE %q%)
-    """
+async def list_events(q: str | None = None, limit: int = 200):
     if not engine:
         return HTMLResponse("<h1>No database configured</h1>", status_code=500)
 
-    sql = text("""
-        SELECT id, received_at, event_type, signature_valid, x_correlation_id,
-               remote_addr, raw_body
-        FROM webhook_event
-        WHERE (:q IS NULL OR event_type ILIKE :qp)
-        ORDER BY received_at DESC
-        LIMIT :limit
-    """)
-    params = {"q": q, "qp": f"%{q}%" if q else None, "limit": limit}
+    if q:
+        sql = text("""
+            SELECT id, received_at, event_type, signature_valid, x_correlation_id,
+                   remote_addr, raw_body
+            FROM webhook_event
+            WHERE event_type ILIKE :pat
+               OR x_correlation_id ILIKE :pat
+               OR remote_addr ILIKE :pat
+               OR raw_body ILIKE :pat
+            ORDER BY received_at DESC
+            LIMIT :limit
+        """)
+        params = {"pat": f"%{q}%", "limit": int(limit)}
+    else:
+        sql = text("""
+            SELECT id, received_at, event_type, signature_valid, x_correlation_id,
+                   remote_addr, raw_body
+            FROM webhook_event
+            ORDER BY received_at DESC
+            LIMIT :limit
+        """)
+        params = {"limit": int(limit)}
 
     async with engine.begin() as conn:
         rows = (await conn.execute(sql, params)).mappings().all()
 
-    def render_body(raw: str) -> str:
-        try:
-            pretty = json.dumps(json.loads(raw), indent=2)
-            return f"<pre>{html.escape(pretty)}</pre>"
-        except Exception:
-            snippet = raw if len(raw) < 8000 else raw[:8000] + "…"
-            return f"<pre>{html.escape(snippet)}</pre>"
+    # very simple HTML table
+    def esc(s):
+        import html
+        return html.escape("" if s is None else str(s))
 
-    head = """
-    <style>
-      body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; padding: 20px; }
-      table { border-collapse: collapse; width: 100%; }
-      th, td { border-bottom: 1px solid #eee; padding: 8px 10px; vertical-align: top; }
-      th { text-align: left; position: sticky; top: 0; background: #fff; }
-      code.bad { color: #b91c1c; font-weight: 600; }
-      code.ok { color: #166534; font-weight: 600; }
-      .toolbar { margin-bottom: 12px; display:flex; gap:10px; align-items:center; }
-      input, select { padding: 6px 8px; }
-      details > summary { cursor: pointer; color: #2563eb; }
-    </style>
-    """
-    toolbar = f"""
-    <div class="toolbar">
-      <form method="get" action="/events">
-        <label>Event filter: <input name="q" value="{html.escape(q or '')}" placeholder="e.g. device.status.updated"></label>
-        <label>Limit: <input type="number" name="limit" min="1" max="10000" value="{limit}"></label>
-        <button type="submit">Apply</button>
-      </form>
-    </div>
-    """
+    rows_html = "\n".join(
+        f"<tr>"
+        f"<td>{esc(r['id'])}</td>"
+        f"<td>{esc(r['received_at'])}</td>"
+        f"<td>{esc(r['event_type'])}</td>"
+        f"<td>{'✅' if r['signature_valid'] else '❌'}</td>"
+        f"<td>{esc(r['x_correlation_id'])}</td>"
+        f"<td>{esc(r['remote_addr'])}</td>"
+        f"<td><pre style='white-space:pre-wrap;margin:0'>{esc(r['raw_body'])}</pre></td>"
+        f"</tr>"
+        for r in rows
+    )
 
-    rows_html = []
-    for r in rows:
-        ok = bool(r["signature_valid"])
-        sig = f'<code class="{"ok" if ok else "bad"}">{"valid" if ok else "invalid"}</code>'
-        rows_html.append(f"""
-        <tr>
-          <td>{r["id"]}</td>
-          <td><code>{html.escape(str(r["received_at"]))}</code></td>
-          <td>{html.escape(r["event_type"] or "")}</td>
-          <td>{sig}</td>
-          <td>{html.escape(r["x_correlation_id"] or "")}</td>
-          <td>{html.escape(r["remote_addr"] or "")}</td>
-          <td>
-            <details>
-              <summary>View payload</summary>
-              {render_body(r["raw_body"] or "")}
-            </details>
-          </td>
-        </tr>
-        """)
-
-    html_page = f"""
-    {head}
-    <h1>Webhook Events</h1>
-    {toolbar}
-    <table>
-      <thead>
-        <tr>
-          <th>ID</th>
-          <th>Received</th>
-          <th>Event Type</th>
-          <th>Signature</th>
-          <th>Correlation ID</th>
-          <th>IP</th>
-          <th>Payload</th>
-        </tr>
-      </thead>
-      <tbody>
-        {''.join(rows_html) if rows_html else '<tr><td colspan="7"><em>No events yet.</em></td></tr>'}
-      </tbody>
-    </table>
+    html = f"""
+    <html><head>
+      <meta charset="utf-8" />
+      <title>Webhook Events</title>
+      <style>
+        body {{ font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; padding: 16px; }}
+        table {{ border-collapse: collapse; width: 100%; }}
+        th, td {{ border: 1px solid #ddd; padding: 8px; vertical-align: top; }}
+        th {{ background: #f7f7f7; position: sticky; top: 0; }}
+        pre {{ font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }}
+        .toolbar {{ margin-bottom: 12px; }}
+        input[type="text"] {{ padding: 6px 8px; width: 260px; }}
+      </style>
+    </head><body>
+      <div class="toolbar">
+        <form method="get" action="/events">
+          <input type="text" name="q" placeholder="Filter…" value="{esc(q) if q else ''}" />
+          <input type="number" name="limit" value="{int(limit)}" min="1" max="1000" />
+          <button type="submit">Apply</button>
+          <a href="/events">Clear</a>
+        </form>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th><th>Received At</th><th>Event</th><th>Signature</th>
+            <th>Correlation ID</th><th>IP</th><th>Raw Body</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows_html}
+        </tbody>
+      </table>
+    </body></html>
     """
-    return HTMLResponse(html_page)
+    return HTMLResponse(html)
 
