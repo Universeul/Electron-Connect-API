@@ -28,7 +28,7 @@ engine = create_async_engine(DB_URL, future=True, echo=False) if DB_URL else Non
 
 
 # Create a single “log everything” table
-DDL = """
+DDL_TABLE = """
 CREATE TABLE IF NOT EXISTS webhook_event (
   id               bigserial PRIMARY KEY,
   received_at      timestamptz NOT NULL DEFAULT now(),
@@ -39,8 +39,12 @@ CREATE TABLE IF NOT EXISTS webhook_event (
   remote_addr      text,
   raw_body         text NOT NULL,
   parsed_body      jsonb
-);
-CREATE INDEX IF NOT EXISTS we_received_at_idx ON webhook_event (received_at DESC);
+)
+"""
+
+DDL_INDEX = """
+CREATE INDEX IF NOT EXISTS we_received_at_idx
+ON webhook_event (received_at DESC)
 """
 
 def compute_sig(raw: bytes) -> str:
@@ -50,11 +54,15 @@ def compute_sig(raw: bytes) -> str:
 
 @app.on_event("startup")
 async def startup():
-    # Create table(s) on boot if DB is configured
     if engine:
-        async with engine.begin() as conn:
-            await conn.execute(text(DDL))
-        logging.info("Database ready")
+        try:
+            async with engine.begin() as conn:
+                # run as two separate statements (asyncpg can't prepare multiple)
+                await conn.execute(text(DDL_TABLE))
+                await conn.execute(text(DDL_INDEX))
+            logging.info("Database ready")
+        except Exception as e:
+            logging.error(f"Database connection failed at startup: {e}")
 
 @app.get("/healthz")
 def health():
