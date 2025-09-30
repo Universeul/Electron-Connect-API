@@ -1,6 +1,15 @@
 from fastapi import FastAPI, Request, Header, Response
 import os, hmac, hashlib, base64, json, logging
 from typing import Optional
+import logging
+
+class SkipHealthz(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        # Only hide uvicorn access-log lines for GET /healthz
+        msg = record.getMessage()
+        return ' "GET /healthz ' not in msg
+
+logging.getLogger("uvicorn.access").addFilter(SkipHealthz())
 
 # --- DB setup (async SQLAlchemy + asyncpg) ---
 from sqlalchemy.ext.asyncio import create_async_engine
